@@ -2150,14 +2150,28 @@ class PeerTransport {
     if (!(await PeerTransport.loadLib())) throw new Error('не удалось загрузить PeerJS');
     const id = 'potasovka-' + code;
     this.asHost = asHost;
-    this.peer = asHost ? new window.Peer(id, { debug: 0 }) : new window.Peer({ debug: 0 });
-    await new Promise((res, rej) => { this.peer.on('open', res); this.peer.on('error', e => rej(new Error(e.type === 'unavailable-id' ? 'Комната с таким кодом уже существует' : e.type === 'peer-unavailable' ? 'Комната не найдена' : 'Ошибка сети: ' + e.type))); setTimeout(() => rej(new Error('Нет ответа от сервера PeerJS')), 12000); });
+    const opts = { debug: 1, config: { iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+      { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
+    ] } };
+    this.status = (t) => { if (this.cbStatus) this.cbStatus(t); };
+    this.status('Подключаемся к серверу PeerJS…');
+    this.peer = asHost ? new window.Peer(id, opts) : new window.Peer(opts);
+    await new Promise((res, rej) => { this.peer.on('open', res); this.peer.on('error', e => rej(new Error(e.type === 'unavailable-id' ? 'Комната с таким кодом уже существует' : e.type === 'peer-unavailable' ? 'Комната не найдена — проверьте код и что хост не закрыл комнату' : 'Ошибка сети PeerJS: ' + e.type))); setTimeout(() => rej(new Error('Сервер PeerJS не отвечает (проверьте интернет / VPN)')), 15000); });
     this.me = this.peer.id;
     this.peer.on('error', e => { if (this.cbError) this.cbError(e.type === 'peer-unavailable' ? 'Комната не найдена' : e.type); });
+    this.peer.on('disconnected', () => { try { if (!this.peer.destroyed) this.peer.reconnect(); } catch (e) {} });
     if (asHost) this.peer.on('connection', c => this.attach(c));
     else {
+      this.status('Сервер найден. Соединяемся с хостом напрямую…');
       const c = this.peer.connect(id, { reliable: true, serialization: 'json' });
-      await new Promise((res, rej) => { c.on('open', res); setTimeout(() => rej(new Error('Не удалось подключиться к комнате')), 10000); });
+      await new Promise((res, rej) => {
+        c.on('open', res);
+        c.on('error', e => rej(new Error('Ошибка соединения: ' + (e.type || e.message || e))));
+        this.peer.on('error', e => rej(new Error(e.type === 'peer-unavailable' ? 'Комната не найдена — проверьте код и что хост не закрыл вкладку' : 'Ошибка: ' + e.type)));
+        setTimeout(() => rej(new Error('Не удалось соединиться с хостом напрямую (сеть блокирует P2P). Попробуйте другую сеть: Wi‑Fi вместо мобильного или наоборот, отключите VPN.')), 20000);
+      });
       this.attach(c);
     }
     return this.me;
@@ -3968,7 +3982,7 @@ const Online = {
     this.L = { mode: Save.p.mode, map: (Save.p.map[Save.p.mode]) || mapsForMode(Save.p.mode)[0].id, bots: true, seats: [], st: 0, teams: {} };
     this.status = 'Создаём комнату…'; this.render();
     try {
-      this.net = await pickTransport(); await this.net.open(this.code, true);
+      this.net = await pickTransport(); this.net.cbStatus = (t) => { this.status = t; this.render(); }; await this.net.open(this.code, true);
       this.status = this.net.kind === 'room' ? 'Комната открыта. Друзья заходят по коду в этой же игре.' : 'Комната открыта (PeerJS). Отправьте код друзьям.';
     } catch (e) { this.status = 'Ошибка: ' + e.message; this.render(); return; }
     this.net.onState((peer, st) => { if (st && st.C) { this.clients.set(peer, st.C); } if (st && st.I) this.inputs.set(peer, st.I); if (st && st.C) this.publishLobby(); });
@@ -3978,7 +3992,7 @@ const Online = {
   },
   async join(code) {
     this.reset(); this.isHost = false; this.code = code; this.active = true; this.status = 'Подключаемся…'; this.render();
-    try { this.net = await pickTransport(); await this.net.open(code, false); }
+    try { this.net = await pickTransport(); this.net.cbStatus = (t) => { this.status = t; this.render(); }; await this.net.open(code, false); }
     catch (e) { this.status = 'Ошибка: ' + e.message; this.render(); return; }
     this.status = 'Подключено. Ищем хоста…'; this.render();
     this.net.cbError = (m) => { this.status = 'Сеть: ' + m; if (Game.state !== 'match') this.render(); };
